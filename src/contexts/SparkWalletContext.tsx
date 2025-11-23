@@ -7,6 +7,10 @@ import { publishZapReceiptForPayment, handleIncomingZap } from '../lib/spark/spa
 import { useAccountContext } from './AccountContext';
 import { logError, logInfo, logWarning } from '../lib/logger';
 import type { LightningAddressInfo } from '@breeztech/breez-sdk-spark/web';
+import { APP_ID } from '../App';
+import { subsTo } from '../sockets';
+import { getProfileZapList } from '../lib/profile';
+import { Kind } from '../constants';
 
 /**
  * Spark Wallet Context
@@ -259,7 +263,6 @@ export const SparkWalletProvider: ParentComponent = (props) => {
 
     try {
       setStore('isConnecting', true);
-      setStore('connectionProgress', 'Initializing wallet...');
 
       // Connect to Breez SDK
       await breezWallet.connect(mnemonic, store.network);
@@ -300,8 +303,6 @@ export const SparkWalletProvider: ParentComponent = (props) => {
           logWarning('[SparkWallet] Backup failed, continuing without backup:', error);
         }
       }
-
-      setStore('connectionProgress', 'Finalizing...');
 
       // Update account context
       account.actions.updateBreezWallet({
@@ -470,11 +471,135 @@ export const SparkWalletProvider: ParentComponent = (props) => {
       setStore('paymentsOffset', payments.length);
       setStore('hasMorePayments', payments.length === limit);
       logInfo(`[SparkWallet] Loaded ${payments.length} payments`);
+
+      // Enrich incoming payments with zap receipt data in the background
+      console.log('🔍 [CRITICAL] About to call enrichIncomingZaps', {
+        hasAccount: !!account,
+        hasPubkey: !!account?.publicKey,
+        pubkey: account?.publicKey?.slice(0, 16),
+        paymentsCount: payments.length,
+      });
+
+      if (account?.publicKey) {
+        console.log('🔍 [CRITICAL] Calling enrichIncomingZaps NOW');
+        enrichIncomingZaps(payments, account.publicKey);
+        console.log('🔍 [CRITICAL] enrichIncomingZaps called (returned)');
+      } else {
+        console.log('🔍 [CRITICAL] NOT calling enrichIncomingZaps - no account or pubkey');
+      }
     } catch (error) {
       logError('[SparkWallet] Failed to load payment history:', error);
       throw error;
     } finally {
       setStore('paymentsLoading', false);
+    }
+  };
+
+  /**
+   * Enrich incoming payments with zap receipt data from Primal cache
+   * This runs in the background and updates payments as zap receipts are found
+   */
+  const enrichIncomingZaps = async (payments: any[], userPubkey: string): Promise<void> => {
+    console.log('[ZAP DEBUG] enrichIncomingZaps called');
+    logInfo(`[SparkWallet] Enriching incoming payments with zap data...`);
+
+    // Filter for incoming payments that aren't already marked as zaps
+    const incomingPayments = payments.filter(
+      (p) => p.paymentType === 'receive' && !p.isZap && p.invoice
+    );
+
+    console.log('[ZAP DEBUG] Incoming payments to enrich:', incomingPayments.length);
+    if (incomingPayments.length > 0) {
+      console.log('[ZAP DEBUG] First payment invoice:', incomingPayments[0].invoice);
+    }
+
+    if (incomingPayments.length === 0) {
+      return;
+    }
+
+    try {
+      // Fetch kind 9735 zap receipts from Primal
+      const subId = `wallet_zaps_${APP_ID}`;
+      const zapReceipts: any[] = [];
+
+      const unsub = subsTo(subId, {
+        onEvent: (_, content) => {
+          if (content?.kind === Kind.Zap) {
+            zapReceipts.push(content);
+          }
+        },
+        onEose: () => {
+          unsub();
+
+          console.log('[ZAP DEBUG] Received zap receipts from Primal:', zapReceipts.length);
+          logInfo(`[SparkWallet] Fetched ${zapReceipts.length} zap receipts from Primal cache`);
+
+          // Create invoice-to-zap mapping
+          const zapsByInvoice = new Map();
+          zapReceipts.forEach((zapEvent, index) => {
+            const bolt11 = (zapEvent.tags.find((t: string[]) => t[0] === 'bolt11') || [])[1];
+            const description = (zapEvent.tags.find((t: string[]) => t[0] === 'description') || [])[1];
+
+            if (index === 0) {
+              console.log('[ZAP DEBUG] First zap receipt bolt11:', bolt11);
+            }
+
+            if (bolt11 && description) {
+              try {
+                const zapRequest = JSON.parse(description);
+                const senderPubkey = zapRequest.pubkey;
+                const eventTag = zapRequest.tags?.find((t: string[]) => t[0] === 'e');
+                const eventId = eventTag?.[1];
+                const comment = zapRequest.content || '';
+
+                zapsByInvoice.set(bolt11, {
+                  senderPubkey,
+                  eventId,
+                  comment,
+                });
+              } catch (e) {
+                // Skip invalid zap receipts
+              }
+            }
+          });
+
+          // Match payments to zaps by invoice
+          console.log('[ZAP DEBUG] Zaps indexed by invoice:', zapsByInvoice.size);
+          console.log('[ZAP DEBUG] Attempting to match', incomingPayments.length, 'payments');
+
+          let matchCount = 0;
+          for (const payment of incomingPayments) {
+            const zapData = zapsByInvoice.get(payment.invoice);
+
+            if (zapData && zapData.senderPubkey) {
+              matchCount++;
+              console.log('[ZAP DEBUG] ✅ MATCH FOUND for payment', payment.id);
+
+              // Enrich payment with zap data
+              const paymentIndex = store.payments.findIndex((p) => p.id === payment.id);
+              if (paymentIndex !== -1) {
+                setStore('payments', paymentIndex, {
+                  ...payment,
+                  isZap: true,
+                  zapSenderPubkey: zapData.senderPubkey,
+                  zapRecipientPubkey: userPubkey,
+                  zapEventId: zapData.eventId,
+                  zapComment: zapData.comment,
+                });
+                logInfo(`[SparkWallet] ✓ Enriched payment ${payment.id} with zap data`);
+              }
+            }
+          }
+
+          console.log('[ZAP DEBUG] Matches found:', matchCount);
+          logInfo(`[SparkWallet] Finished enriching incoming zaps`);
+        },
+      });
+
+      // Query for zap receipts (kind 9735) where user is recipient
+      getProfileZapList(userPubkey, subId, 0, 0, 100);
+    } catch (error) {
+      logError(`[SparkWallet] Failed to enrich incoming zaps:`, error);
     }
   };
 

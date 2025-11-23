@@ -23,6 +23,7 @@ import initBreezSDK, {
   CheckLightningAddressRequest,
 } from '@breeztech/breez-sdk-spark/web';
 import { logError, logInfo, logWarning } from './logger';
+import { getZapData } from './zap';
 
 /**
  * Breez Wallet Service
@@ -50,6 +51,13 @@ export type BreezPaymentInfo = {
   invoice?: string;
   preimage?: string;
   paymentHash?: string;
+
+  // Zap-specific fields (NIP-57)
+  isZap?: boolean; // True if this payment is a Nostr zap
+  zapSenderPubkey?: string; // Sender's nostr pubkey (hex)
+  zapRecipientPubkey?: string; // Recipient's nostr pubkey (hex)
+  zapComment?: string; // Zap comment/message
+  zapEventId?: string; // Event ID if zapping a note
 };
 
 type BreezEventHandler = (event: SdkEvent) => void;
@@ -598,6 +606,148 @@ class BreezWalletService {
   }
 
   /**
+   * Fetch zap receipt from Nostr relays for an incoming payment
+   * This is needed for incoming zaps where we don't have the zap request locally
+   */
+  async fetchZapReceiptForPayment(
+    payment: BreezPaymentInfo,
+    userPubkey: string
+  ): Promise<BreezPaymentInfo> {
+    // Only fetch for incoming payments that don't already have zap data
+    if (payment.paymentType !== 'receive' || payment.isZap || !payment.invoice) {
+      return payment;
+    }
+
+    try {
+      logInfo(`[BreezWallet] Fetching zap receipt for incoming payment ${payment.id}`);
+
+      // Import dynamically to avoid circular dependencies
+      const { fetchZapReceiptForInvoice } = await import('./spark/fetchZapReceipts');
+      const zapReceipt = await fetchZapReceiptForInvoice(payment.invoice, userPubkey);
+
+      if (zapReceipt) {
+        // Enrich payment with zap data
+        payment.isZap = true;
+        payment.zapSenderPubkey = zapReceipt.senderPubkey;
+        payment.zapRecipientPubkey = zapReceipt.recipientPubkey;
+        payment.zapEventId = zapReceipt.eventId;
+        payment.zapComment = zapReceipt.comment;
+
+        logInfo(`[BreezWallet] ✓ Enriched incoming zap from relay data`);
+        logInfo(`[BreezWallet]   Sender: ${payment.zapSenderPubkey?.slice(0, 16)}...`);
+        logInfo(`[BreezWallet]   Event: ${payment.zapEventId || 'none (profile zap)'}`);
+      }
+
+      return payment;
+    } catch (error) {
+      logError('[BreezWallet] Failed to fetch zap receipt from relays:', error);
+      return payment;
+    }
+  }
+
+  /**
+   * Enrich payment with zap data from NIP-57 zap request
+   * Parses the payment description to extract zap request details,
+   * or retrieves from localStorage if description doesn't contain zap request
+   */
+  private enrichPaymentWithZapData(payment: BreezPaymentInfo): BreezPaymentInfo {
+    // First try: Check if payment hash has zap data in localStorage
+    if (payment.paymentHash) {
+      console.log(`[BreezWallet ZAP DEBUG] Payment ${payment.id} has paymentHash: ${payment.paymentHash}`);
+      try {
+        const zapData = getZapData(payment.paymentHash);
+        console.log(`[BreezWallet ZAP DEBUG] localStorage lookup result:`, zapData ? 'FOUND' : 'NOT FOUND');
+        if (zapData) {
+          console.log(`[BreezWallet ZAP DEBUG] Found zap data in localStorage for payment ${payment.id}`);
+          payment.isZap = true;
+          payment.zapSenderPubkey = zapData.zapRequest.pubkey;
+          payment.zapRecipientPubkey = zapData.recipientPubkey;
+          payment.zapComment = zapData.zapRequest.content || '';
+
+          // Extract event ID from tags
+          const eTag = zapData.zapRequest.tags?.find((t: string[]) => t[0] === 'e');
+          if (eTag && eTag[1]) {
+            payment.zapEventId = eTag[1];
+          }
+
+          logInfo(`[BreezWallet] ✓ Enriched zap payment from localStorage: ${payment.id}`);
+          logInfo(`[BreezWallet]   Sender: ${payment.zapSenderPubkey?.slice(0, 16)}...`);
+          logInfo(`[BreezWallet]   Recipient: ${payment.zapRecipientPubkey?.slice(0, 16)}...`);
+          logInfo(`[BreezWallet]   Event: ${payment.zapEventId || 'none (profile zap)'}`);
+          logInfo(`[BreezWallet]   Comment: ${payment.zapComment || 'none'}`);
+
+          // If we found zap data in localStorage, we're done
+          return payment;
+        }
+      } catch (error) {
+        console.warn('[BreezWallet] Failed to check localStorage for zap data:', error);
+      }
+    } else {
+      console.log(`[BreezWallet ZAP DEBUG] Payment ${payment.id} has NO paymentHash`);
+    }
+
+    // Second try: Parse description as JSON (for invoices that have zap request embedded)
+    if (!payment.description) {
+      console.log(`[BreezWallet ZAP DEBUG] Payment ${payment.id} has NO description`);
+      return payment;
+    }
+
+    console.log(`[BreezWallet ZAP DEBUG] Processing payment ${payment.id}`);
+    console.log(`[BreezWallet ZAP DEBUG] Description length: ${payment.description.length} chars`);
+    console.log(`[BreezWallet ZAP DEBUG] Description:`, payment.description);
+
+    try {
+      // Try to parse description as JSON (zap requests are kind 9734 Nostr events)
+      const zapRequest = JSON.parse(payment.description);
+
+      logInfo(`[BreezWallet] Parsed JSON - kind: ${zapRequest.kind}`);
+
+      // Check if it's a valid zap request (kind 9734)
+      if (zapRequest.kind !== 9734) {
+        logInfo(`[BreezWallet] Not a zap request (kind ${zapRequest.kind})`);
+        return payment;
+      }
+
+      // Extract zap data from the zap request event
+      payment.isZap = true;
+
+      // Sender is the pubkey who created the zap request
+      if (zapRequest.pubkey) {
+        payment.zapSenderPubkey = zapRequest.pubkey;
+      }
+
+      // Recipient is in the 'p' tag
+      const pTag = zapRequest.tags?.find((t: string[]) => t[0] === 'p');
+      if (pTag && pTag[1]) {
+        payment.zapRecipientPubkey = pTag[1];
+      }
+
+      // Event being zapped is in the 'e' tag (optional)
+      const eTag = zapRequest.tags?.find((t: string[]) => t[0] === 'e');
+      if (eTag && eTag[1]) {
+        payment.zapEventId = eTag[1];
+      }
+
+      // Comment/message is in the content field
+      if (zapRequest.content) {
+        payment.zapComment = zapRequest.content;
+      }
+
+      logInfo(`[BreezWallet] ✓ Enriched zap payment from description: ${payment.id}`);
+      logInfo(`[BreezWallet]   Sender: ${payment.zapSenderPubkey?.slice(0, 16)}...`);
+      logInfo(`[BreezWallet]   Recipient: ${payment.zapRecipientPubkey?.slice(0, 16)}...`);
+      logInfo(`[BreezWallet]   Event: ${payment.zapEventId || 'none (profile zap)'}`);
+      logInfo(`[BreezWallet]   Comment: ${payment.zapComment || 'none'}`);
+    } catch (error) {
+      // Not a JSON description or not a valid zap request - that's okay
+      // This is normal for regular Lightning payments
+      logInfo(`[BreezWallet] Description is not JSON or not a zap request (normal for regular payments)`);
+    }
+
+    return payment;
+  }
+
+  /**
    * Map SDK Payment to simplified BreezPaymentInfo
    */
   private mapPaymentToInfo(payment: Payment): BreezPaymentInfo {
@@ -623,7 +773,8 @@ class BreezWalletService {
       }
     }
 
-    return info;
+    // Enrich with zap data if this is a zap payment
+    return this.enrichPaymentWithZapData(info);
   }
 }
 

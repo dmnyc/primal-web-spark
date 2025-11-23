@@ -6,13 +6,61 @@ import { MegaFeedPage, NostrRelaySignedEvent, NostrUserZaps, PrimalArticle, Prim
 import { logError } from "./logger";
 import { decrypt, enableWebLn, encrypt, sendPayment, signEvent } from "./nostrAPI";
 import { decodeNWCUri } from "./wallet";
-import { hexToBytes, parseBolt11 } from "../utils";
+import { hexToBytes } from "../utils";
+// @ts-ignore
+import { decode as decodeBolt11 } from 'light-bolt11-decoder';
 import { convertToUser } from "../stores/profile";
 import { StreamingData } from "./streaming";
 
 export let lastZapError: string = "";
 
-export const zapOverBreez = async (invoice: string, recipientPubkey?: string): Promise<boolean> => {
+// Temporary storage for zap requests by payment hash
+// We need this because LNURL servers don't reliably embed zap requests in invoice descriptions
+const pendingZapRequests = new Map<string, { zapRequest: any, recipientPubkey: string }>();
+
+// LocalStorage key for persistent zap data
+const ZAP_DATA_STORAGE_KEY = 'primal_spark_zap_data';
+
+// Save zap data to localStorage
+function saveZapData(paymentHash: string, zapData: { zapRequest: any, recipientPubkey: string }) {
+  try {
+    const existing = JSON.parse(localStorage.getItem(ZAP_DATA_STORAGE_KEY) || '{}');
+    existing[paymentHash] = {
+      ...zapData,
+      timestamp: Date.now(),
+    };
+
+    // Clean up old entries (older than 30 days)
+    const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
+    Object.keys(existing).forEach(hash => {
+      if (existing[hash].timestamp < thirtyDaysAgo) {
+        delete existing[hash];
+      }
+    });
+
+    localStorage.setItem(ZAP_DATA_STORAGE_KEY, JSON.stringify(existing));
+  } catch (error) {
+    console.warn('[Zap] Failed to save zap data to localStorage:', error);
+  }
+}
+
+// Get zap data from localStorage
+export function getZapData(paymentHash: string): { zapRequest: any, recipientPubkey: string } | null {
+  try {
+    const existing = JSON.parse(localStorage.getItem(ZAP_DATA_STORAGE_KEY) || '{}');
+    return existing[paymentHash] || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+export const zapOverBreez = async (invoice: string, recipientPubkey?: string, zapRequest?: any): Promise<boolean> => {
+  console.log('[Zap] zapOverBreez called with:', {
+    hasInvoice: !!invoice,
+    hasRecipientPubkey: !!recipientPubkey,
+    hasZapRequest: !!zapRequest,
+  });
+
   try {
     const { breezWallet } = await import('./breezWalletService');
 
@@ -23,8 +71,71 @@ export const zapOverBreez = async (invoice: string, recipientPubkey?: string): P
       return false;
     }
 
+    // Store zap request data temporarily if we have it
+    if (zapRequest && recipientPubkey) {
+      console.log('[Zap] Attempting to store zap request data...');
+      try {
+        // Extract payment hash from invoice to use as key
+        const decoded = decodeBolt11(invoice);
+        console.log('[Zap] Decoded invoice:', decoded ? 'SUCCESS' : 'FAILED');
+
+        // Extract payment hash from sections array
+        const paymentHash = decoded?.sections?.find((s: any) => s.name === 'payment_hash')?.value;
+        console.log('[Zap] Extracted payment hash:', paymentHash);
+
+        if (paymentHash) {
+          console.log('[Zap] ✓ Storing zap request for payment hash:', paymentHash);
+          const zapData = { zapRequest, recipientPubkey };
+
+          // Store in memory
+          pendingZapRequests.set(paymentHash, zapData);
+
+          // Store persistently in localStorage
+          saveZapData(paymentHash, zapData);
+          console.log('[Zap] ✓ Saved to localStorage');
+
+          // Clean up memory after 5 minutes to prevent memory leaks
+          // (localStorage persists longer)
+          setTimeout(() => {
+            pendingZapRequests.delete(paymentHash);
+          }, 5 * 60 * 1000);
+        } else {
+          console.warn('[Zap] No payment hash found in decoded invoice');
+        }
+      } catch (error) {
+        console.warn('[Zap] Failed to parse invoice for payment hash:', error);
+      }
+    } else {
+      console.warn('[Zap] Missing zapRequest or recipientPubkey:', {
+        hasZapRequest: !!zapRequest,
+        hasRecipientPubkey: !!recipientPubkey,
+      });
+    }
+
     // Send payment via Breez SDK
     const paymentInfo = await breezWallet.sendPayment(invoice);
+
+    // If payment succeeded and we have zap data, enrich the payment
+    if (paymentInfo.status === 'completed' && paymentInfo.paymentHash) {
+      const zapData = pendingZapRequests.get(paymentInfo.paymentHash);
+      if (zapData) {
+        console.log('[Zap] Enriching completed payment with zap data');
+        // Manually enrich the payment info since the description doesn't have the zap request
+        paymentInfo.isZap = true;
+        paymentInfo.zapSenderPubkey = zapData.zapRequest.pubkey;
+        paymentInfo.zapRecipientPubkey = zapData.recipientPubkey;
+        paymentInfo.zapComment = zapData.zapRequest.content || '';
+
+        // Extract event ID from tags
+        const eTag = zapData.zapRequest.tags?.find((t: string[]) => t[0] === 'e');
+        if (eTag && eTag[1]) {
+          paymentInfo.zapEventId = eTag[1];
+        }
+
+        // Clean up
+        pendingZapRequests.delete(paymentInfo.paymentHash);
+      }
+    }
 
     // Publish zap receipt if payment succeeded
     if (paymentInfo.status === 'completed' && recipientPubkey) {
@@ -150,6 +261,8 @@ export const zapNote = async (
   nwc?: string[],
   walletType?: 'nwc' | 'breez' | null,
 ) => {
+  console.log('[Zap] zapNote called with walletType:', walletType);
+
   if (!sender) {
     return false;
   }
@@ -184,16 +297,24 @@ export const zapNote = async (
     const r2 = await (await fetch(`${callback}?amount=${sats}&nostr=${event}`)).json();
     const pr = r2.pr;
 
+    console.log('[Zap zapNote] About to check walletType. Current value:', walletType);
+    console.log('[Zap zapNote] walletType === "breez":', walletType === 'breez');
+
     // Use Breez if it's the active wallet type
     if (walletType === 'breez') {
-      return await zapOverBreez(pr, note.pubkey);
+      console.log('[Zap zapNote] ✓ Using Breez wallet for zap');
+      return await zapOverBreez(pr, note.pubkey, signedEvent);
     }
+
+    console.log('[Zap zapNote] NOT using Breez. Trying NWC or WebLN...');
 
     // Use NWC if configured
     if (nwc && nwc[1] && nwc[1].length > 0) {
+      console.log('[Zap zapNote] Using NWC');
       return await zapOverNWC(sender, nwc[1], pr);
     }
 
+    console.log('[Zap zapNote] Using WebLN fallback');
     // Fallback to WebLN
     await enableWebLn();
     await sendPayment(pr);
@@ -256,7 +377,7 @@ export const zapArticle = async (
 
     // Use Breez if it's the active wallet type
     if (walletType === 'breez') {
-      return await zapOverBreez(pr);
+      return await zapOverBreez(pr, note.pubkey, signedEvent);
     }
 
     // Use NWC if configured
@@ -318,7 +439,7 @@ export const zapProfile = async (
 
     // Use Breez if it's the active wallet type
     if (walletType === 'breez') {
-      return await zapOverBreez(pr, profile.pubkey);
+      return await zapOverBreez(pr, profile.pubkey, signedEvent);
     }
 
     // Use NWC if configured
@@ -615,10 +736,20 @@ export const convertToZap = (zapContent: NostrUserZaps) => {
   let zappedId = '';
   let zappedKind: number = 0;
 
+  // Decode bolt11 to get amount
+  let amount = 0;
+  try {
+    const decoded = decodeBolt11(bolt11);
+    const amountMillisats = decoded?.sections?.find((s: any) => s.name === 'amount')?.value;
+    amount = amountMillisats ? parseInt(amountMillisats) / 1000 : 0; // Convert from millisats to sats
+  } catch (e) {
+    console.warn('[convertToZaps] Failed to decode bolt11 amount:', e);
+  }
+
   const zap: PrimalZap = {
     id: zapContent.id,
     message: zapEvent.content || '',
-    amount: parseBolt11(bolt11) || 0,
+    amount,
     sender: senderPubkey,
     reciver: receiverPubkey,
     created_at: zapContent.created_at,

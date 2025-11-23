@@ -1,6 +1,15 @@
-import { Component, For, Show, createSignal } from 'solid-js';
+import { Component, For, Show, createSignal, createEffect, onCleanup } from 'solid-js';
+import { createStore } from 'solid-js/store';
 import { BreezPaymentInfo } from '../../lib/breezWalletService';
 import { useToastContext } from '../Toaster/Toaster';
+import { nip19 } from '../../lib/nTools';
+import { useAccountContext } from '../../contexts/AccountContext';
+import { A } from '@solidjs/router';
+import { getUserProfiles } from '../../lib/profile';
+import { subsTo } from '../../sockets';
+import { convertToUser } from '../../stores/profile';
+import { nip05Verification, userName } from '../../stores/profile';
+import { PrimalUser } from '../../types/primal';
 
 import styles from './SparkPaymentsList.module.scss';
 
@@ -15,9 +24,102 @@ type SparkPaymentsListProps = {
 
 const SparkPaymentsList: Component<SparkPaymentsListProps> = (props) => {
   const toast = useToastContext();
+  const account = useAccountContext();
   const [expandedPayments, setExpandedPayments] = createSignal<Set<string>>(new Set());
   const [refreshingPayments, setRefreshingPayments] = createSignal<Set<string>>(new Set());
   const [isLoadingMore, setIsLoadingMore] = createSignal(false);
+
+  // Store for zap-related profiles (both senders and recipients)
+  const [zapProfiles, setZapProfiles] = createStore<Record<string, PrimalUser>>({});
+
+  // Fetch profiles for all zap participants (senders for incoming, recipients for outgoing)
+  createEffect(() => {
+    const zapPayments = props.payments.filter(p => p.isZap);
+
+    // Collect all pubkeys we need to fetch
+    const pubkeysToFetch = new Set<string>();
+
+    zapPayments.forEach(payment => {
+      // For outgoing zaps, fetch recipient profiles
+      if (payment.paymentType === 'send' && payment.zapRecipientPubkey) {
+        pubkeysToFetch.add(payment.zapRecipientPubkey);
+      }
+      // For incoming zaps, fetch sender profiles
+      if (payment.paymentType === 'receive' && payment.zapSenderPubkey) {
+        pubkeysToFetch.add(payment.zapSenderPubkey);
+      }
+    });
+
+    const pubkeys = Array.from(pubkeysToFetch);
+
+    if (pubkeys.length === 0) return;
+
+    const subId = `spark_payment_profiles_${Date.now()}`;
+
+    const unsub = subsTo(subId, {
+      onEvent: (_, content) => {
+        if (content?.kind === 0) {
+          const user = convertToUser(content);
+          if (user) {
+            setZapProfiles(user.pubkey, user);
+          }
+        }
+      },
+      onEose: () => {
+        unsub();
+      }
+    });
+
+    getUserProfiles(pubkeys, subId);
+
+    onCleanup(() => {
+      unsub();
+    });
+  });
+
+  // Helper to convert hex pubkey to npub
+  const hexToNpub = (hex: string) => {
+    try {
+      return nip19.npubEncode(hex);
+    } catch (e) {
+      return hex;
+    }
+  };
+
+  // Helper to convert hex event ID to note1
+  const hexToNote = (hex: string) => {
+    try {
+      return nip19.noteEncode(hex);
+    } catch (e) {
+      return hex;
+    }
+  };
+
+  // Helper to truncate npub/note IDs
+  const truncateId = (id: string, startChars = 8, endChars = 4) => {
+    if (id.length <= startChars + endChars) return id;
+    return `${id.substring(0, startChars)}...${id.substring(id.length - endChars)}`;
+  };
+
+  // Get display name for a zap user (sender or recipient) - prioritizes NIP-05, then name, then truncated npub
+  const getZapUserDisplay = (pubkey: string) => {
+    const profile = zapProfiles[pubkey];
+
+    // Try NIP-05 first
+    if (profile?.nip05) {
+      const nip05Display = nip05Verification(profile);
+      if (nip05Display) return nip05Display;
+    }
+
+    // Fall back to name
+    if (profile) {
+      const name = userName(profile);
+      if (name) return name;
+    }
+
+    // Fall back to truncated npub
+    return truncateId(hexToNpub(pubkey));
+  };
 
   const toggleExpanded = (paymentId: string) => {
     setExpandedPayments(prev => {
@@ -206,24 +308,90 @@ const SparkPaymentsList: Component<SparkPaymentsListProps> = (props) => {
                       <span class={styles.paymentDate}>
                         {formatDate(payment.timestamp)}
                       </span>
-                      <span
-                        class={`${styles.paymentStatus} ${
-                          payment.status === 'completed'
-                            ? styles.statusCompleted
-                            : payment.status === 'pending'
-                            ? styles.statusPending
-                            : styles.statusFailed
-                        }`}
-                      >
-                        {payment.status}
-                      </span>
+                      <Show when={!payment.isZap}>
+                        <span
+                          class={`${styles.paymentStatus} ${
+                            payment.status === 'completed'
+                              ? styles.statusCompleted
+                              : payment.status === 'pending'
+                              ? styles.statusPending
+                              : styles.statusFailed
+                          }`}
+                        >
+                          {payment.status}
+                        </span>
+                      </Show>
                     </div>
                   </div>
 
+                  {/* Zap Info Line - Second line for zap payments */}
+                  <Show when={payment.isZap}>
+                    <div class={styles.zapInfoLine}>
+                      <div class={styles.zapInfoLeft}>
+                        <Show
+                          when={payment.zapEventId}
+                          fallback={
+                            <span class={styles.zapBadge} title="Nostr Zap (NIP-57)">
+                              ⚡ Zap
+                            </span>
+                          }
+                        >
+                          <A
+                            href={`/e/${hexToNote(payment.zapEventId!)}`}
+                            class={styles.zapBadgeLink}
+                            title="View zapped note"
+                          >
+                            ⚡ Zap
+                          </A>
+                        </Show>
+                        <span class={styles.zapRecipientInfo}>
+                          {/* Incoming zap: Sender → You */}
+                          <Show when={received}>
+                            <Show when={payment.zapSenderPubkey}>
+                              <A href={`/p/${hexToNpub(payment.zapSenderPubkey!)}`} class={styles.zapRecipientLink}>
+                                {getZapUserDisplay(payment.zapSenderPubkey!)}
+                              </A>
+                              {' → You'}
+                            </Show>
+                          </Show>
+                          {/* Outgoing zap: You → Recipient */}
+                          <Show when={!received}>
+                            You →{' '}
+                            <Show when={payment.zapRecipientPubkey}>
+                              <A href={`/p/${hexToNpub(payment.zapRecipientPubkey!)}`} class={styles.zapRecipientLink}>
+                                {getZapUserDisplay(payment.zapRecipientPubkey!)}
+                              </A>
+                            </Show>
+                          </Show>
+                        </span>
+                      </div>
+                      <div class={styles.zapInfoRight}>
+                        <span
+                          class={`${styles.paymentStatus} ${
+                            payment.status === 'completed'
+                              ? styles.statusCompleted
+                              : payment.status === 'pending'
+                              ? styles.statusPending
+                              : styles.statusFailed
+                          }`}
+                        >
+                          {payment.status}
+                        </span>
+                      </div>
+                    </div>
+                  </Show>
+
                   {/* Description - Full width on second line if exists */}
-                  <Show when={payment.description}>
+                  <Show when={payment.description && !payment.isZap}>
                     <p class={styles.paymentDescription}>
                       {payment.description}
+                    </p>
+                  </Show>
+
+                  {/* Zap Comment - Show comment instead of raw JSON description for zaps */}
+                  <Show when={payment.isZap && payment.zapComment}>
+                    <p class={styles.paymentDescription}>
+                      💬 {payment.zapComment}
                     </p>
                   </Show>
 
@@ -244,6 +412,72 @@ const SparkPaymentsList: Component<SparkPaymentsListProps> = (props) => {
                       </Show>
 
                       <div class={styles.detailsGrid}>
+                        {/* Zap-specific details */}
+                        <Show when={payment.isZap}>
+                          {/* Zap Sender */}
+                          <Show when={payment.zapSenderPubkey}>
+                            <div class={styles.detailRow}>
+                              <span class={styles.detailLabel}>From (Sender):</span>
+                              <div class={styles.detailValue}>
+                                <code class={styles.detailCode}>
+                                  {hexToNpub(payment.zapSenderPubkey!)}
+                                </code>
+                                <button
+                                  class={styles.copyButton}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    copyToClipboard(hexToNpub(payment.zapSenderPubkey!), 'Sender npub');
+                                  }}
+                                >
+                                  <div class={styles.copyIcon}></div>
+                                </button>
+                              </div>
+                            </div>
+                          </Show>
+
+                          {/* Zap Recipient */}
+                          <Show when={payment.zapRecipientPubkey}>
+                            <div class={styles.detailRow}>
+                              <span class={styles.detailLabel}>To (Recipient):</span>
+                              <div class={styles.detailValue}>
+                                <code class={styles.detailCode}>
+                                  {hexToNpub(payment.zapRecipientPubkey!)}
+                                </code>
+                                <button
+                                  class={styles.copyButton}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    copyToClipboard(hexToNpub(payment.zapRecipientPubkey!), 'Recipient npub');
+                                  }}
+                                >
+                                  <div class={styles.copyIcon}></div>
+                                </button>
+                              </div>
+                            </div>
+                          </Show>
+
+                          {/* Zapped Event ID */}
+                          <Show when={payment.zapEventId}>
+                            <div class={styles.detailRow}>
+                              <span class={styles.detailLabel}>Zapped Note:</span>
+                              <div class={styles.detailValue}>
+                                <code class={styles.detailCode}>
+                                  {hexToNote(payment.zapEventId!)}
+                                </code>
+                                <button
+                                  class={styles.copyButton}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    copyToClipboard(hexToNote(payment.zapEventId!), 'Note ID');
+                                  }}
+                                >
+                                  <div class={styles.copyIcon}></div>
+                                </button>
+                              </div>
+                            </div>
+                          </Show>
+                        </Show>
+
                         {/* Payment ID */}
                         <div class={styles.detailRow}>
                           <span class={styles.detailLabel}>Payment ID:</span>

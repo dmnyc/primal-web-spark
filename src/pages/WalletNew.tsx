@@ -926,7 +926,7 @@ const WalletContent: Component = () => {
                   <Loader />
                 </div>
                 <div class={styles.emptyTitle}>
-                  Restoring wallet...
+                  Loading wallet...
                 </div>
                 <div class={styles.emptyDescription}>
                   <Show when={sparkWallet.store.connectionProgress}>
@@ -934,9 +934,7 @@ const WalletContent: Component = () => {
                       {sparkWallet.store.connectionProgress}
                     </div>
                   </Show>
-                  Connecting to your Breez Spark wallet and syncing your balance.
-                  <br/>
-                  <strong>This may take up to a minute.</strong> Please be patient.
+                  Connecting to your Breez Spark wallet and syncing your balance. This may take up to a minute. Please be patient.
                 </div>
               </div>
             </Show>
