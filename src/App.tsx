@@ -18,6 +18,7 @@ import { AdvancedSearchProvider } from './contexts/AdvancedSearchContext';
 import { DMProvider } from './contexts/DMContext';
 import { SparkWalletProvider } from './contexts/SparkWalletContext';
 import { ZapNotificationProvider } from './contexts/ZapNotificationContext';
+import { clearExpiredCache } from './lib/reactionCache';
 import 'media-chrome';
 import "media-chrome/media-theme-element";
 import 'hls-video-element';
@@ -33,6 +34,9 @@ const App: Component = () => {
 
   onMount(() => {
     connect();
+
+    // Clear expired reaction cache entries on startup
+    clearExpiredCache();
 
     // if ('serviceWorker' in navigator) {
     //   navigator.serviceWorker.register('./sw.js')

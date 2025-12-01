@@ -56,7 +56,6 @@ export type SettingsContextStore = {
   themes: PrimalTheme[],
   useSystemTheme: boolean,
   isAnimated: boolean,
-  zapAnimations: ZapAnimationSettings,
   availableFeeds: PrimalFeed[],
   readsFeeds: PrimalArticleFeed[],
   homeFeeds: PrimalArticleFeed[],
@@ -71,6 +70,9 @@ export type SettingsContextStore = {
   contentModeration: ContentModeration[],
   mobileReleases: MobileReleases,
   recomendedBlossomServers: string[],
+  oneClickReactions: boolean,
+  defaultReactionEmoji: string,
+  zapAnimations: ZapAnimationSettings,
   actions: {
     setTheme: (theme: PrimalTheme | null) => void,
     setThemeByName: (theme: string | null, temp?: boolean) => void,
@@ -108,9 +110,11 @@ export type SettingsContextStore = {
     removeFeed: (feed: PrimalArticleFeed, feedType: FeedType) => void,
     isFeedAdded: (feed: PrimalArticleFeed, destination: 'home' | 'reads') => boolean,
     setAnimation: (isAnimated: boolean, temp?: boolean) => void,
-    setZapAnimationSettings: (settings: ZapAnimationSettings) => void,
     getRecomendedBlossomServers: () => void,
     setUseSystemTheme: (v: boolean) => void,
+    setOneClickReactions: (enabled: boolean, temp?: boolean) => void,
+    setDefaultReactionEmoji: (emoji: string, temp?: boolean) => void,
+    setZapAnimationSettings: (settings: ZapAnimationSettings) => void,
   }
 }
 
@@ -120,12 +124,6 @@ export const initialData = {
   themes,
   useSystemTheme: false,
   isAnimated: true,
-  zapAnimations: {
-    enabled: true,
-    triggerMode: 'all',
-    minAmount: 1000,
-    direction: 'both',
-  },
   availableFeeds: [],
   readsFeeds: [],
   homeFeeds: [],
@@ -143,6 +141,14 @@ export const initialData = {
     android: { date: `${andRD}`, version: andVersion },
   },
   recomendedBlossomServers: [],
+  oneClickReactions: false,
+  defaultReactionEmoji: '❤️',
+  zapAnimations: {
+    enabled: true,
+    triggerMode: 'all',
+    minAmount: 1000,
+    direction: 'both',
+  },
 };
 
 export type FeedType = 'home' | 'reads';
@@ -274,6 +280,18 @@ export const SettingsProvider = (props: { children: ContextChildren }) => {
 
     saveAnimated(account?.publicKey, isAnimated);
     updateStore('isAnimated', () => isAnimated);
+
+    !temp && saveSettings();
+  };
+
+  const setOneClickReactions = (enabled: boolean, temp?: boolean) => {
+    updateStore('oneClickReactions', () => enabled);
+
+    !temp && saveSettings();
+  };
+
+  const setDefaultReactionEmoji = (emoji: string, temp?: boolean) => {
+    updateStore('defaultReactionEmoji', () => emoji);
 
     !temp && saveSettings();
   };
@@ -680,6 +698,8 @@ export const SettingsProvider = (props: { children: ContextChildren }) => {
       contentModeration: store.contentModeration,
       proxyThroughPrimal: account?.proxyThroughPrimal || false,
       animated: store.isAnimated,
+      oneClickReactions: store.oneClickReactions,
+      defaultReactionEmoji: store.defaultReactionEmoji,
       zapAnimations: store.zapAnimations,
     };
 
@@ -785,6 +805,8 @@ export const SettingsProvider = (props: { children: ContextChildren }) => {
             applyContentModeration,
             contentModeration,
             proxyThroughPrimal,
+            oneClickReactions,
+            defaultReactionEmoji,
             zapAnimations,
           } = JSON.parse(content.content || '{}');
 
@@ -806,12 +828,20 @@ export const SettingsProvider = (props: { children: ContextChildren }) => {
 
           setAnimation(animated, true);
 
-          // Load zap animations settings or use default
+          // Load reaction preferences
+          if (oneClickReactions !== undefined) {
+            setOneClickReactions(oneClickReactions, true);
+          }
+          if (defaultReactionEmoji) {
+            setDefaultReactionEmoji(defaultReactionEmoji, true);
+          }
+
+          // Load zap animation settings
           if (zapAnimations) {
             updateStore('zapAnimations', () => ({ ...zapAnimations }));
           } else {
-            const loadedSettings = loadZapAnimationSettings(pubkey);
-            updateStore('zapAnimations', () => loadedSettings);
+            const loadedZapAnimations = loadZapAnimationSettings(pubkey);
+            updateStore('zapAnimations', () => loadedZapAnimations);
           }
 
           // If new setting is missing, merge with the old setting
@@ -1114,10 +1144,12 @@ export const SettingsProvider = (props: { children: ContextChildren }) => {
       isFeedAdded,
 
       setAnimation,
-      setZapAnimationSettings,
 
       getRecomendedBlossomServers,
       setUseSystemTheme,
+      setOneClickReactions,
+      setDefaultReactionEmoji,
+      setZapAnimationSettings,
     },
   });
 

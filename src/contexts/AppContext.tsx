@@ -26,6 +26,7 @@ export type ReactionStats = {
   reposts: number,
   quotes: number,
   openOn: string,
+  note?: PrimalNote | PrimalArticle,
 };
 
 export type CustomZapInfo = {

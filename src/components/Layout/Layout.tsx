@@ -158,6 +158,7 @@ const Layout: Component<any> = (props) => {
         <ReactionsModal
           noteId={app?.showReactionsModal}
           stats={app?.reactionStats}
+          note={app?.reactionStats?.note}
           onClose={() => app?.actions.closeReactionModal()}
         />
 
