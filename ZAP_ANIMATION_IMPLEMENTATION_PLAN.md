@@ -708,9 +708,14 @@ zapAnimations: {
   enabled: boolean;           // Default: true
   triggerMode: 'all' | 'min'; // Default: 'all'
   minAmount: number;          // Default: 1000 (only for incoming)
-  direction: 'both' | 'incoming'; // Default: 'both'
+  direction: 'both' | 'incoming' | 'outgoing'; // Default: 'both'
 }
 ```
+
+**Note**: The `direction` field was updated to include `'outgoing'` to fix a backwards logic bug where "Only sent zaps" was incorrectly mapped to `'incoming'`. The correct mapping is:
+- `'both'` - Show animations for sent and received zaps
+- `'incoming'` - Show animations only for received zaps (Breez wallet only)
+- `'outgoing'` - Show animations only for sent zaps
 
 ### Performance Characteristics
 
@@ -755,6 +760,43 @@ zapAnimations: {
 - **triggerMode: 'all'** - Show all zaps by default for maximum feedback
 - **minAmount: 1000** - Reasonable default for "minimum" mode (1k sats)
 - **direction: 'both'** - Show sent and received for complete feedback
+
+---
+
+## Recent Updates & Bug Fixes (Dec 2025)
+
+### Bug Fixes Applied
+
+1. **Direction Setting Logic Fix** (Commit: c9e4fb96)
+   - **Issue**: "Only sent zaps" dropdown option had value `'incoming'` instead of `'outgoing'`
+   - **Impact**: Users selecting "Only sent zaps" would not see animations for sent zaps
+   - **Fix**: Changed dropdown value to `'outgoing'` for "Only sent zaps" option
+   - **Files Modified**:
+     - `src/pages/Settings/Appearance.tsx` - Fixed dropdown value
+     - `src/lib/localStore.ts` - Added `'outgoing'` to type definition
+     - `src/contexts/ZapNotificationContext.tsx` - Added logic to block incoming when direction is 'outgoing'
+
+2. **Custom Zap Animation Trigger** (Commit: c9e4fb96)
+   - **Issue**: Lightning animations only showed for quick zaps (single click), not custom amounts (long-press)
+   - **Root Cause**: `triggerZapAnimation` was only called in `doQuickZap`, not in custom zap success callback
+   - **Fix**: Added animation trigger in `Note.tsx` `onSuccessZap` callback
+   - **Files Modified**: `src/components/Note/Note.tsx`
+
+3. **ReactionsModal Z-Index Fix** (Commit: c9e4fb96)
+   - **Issue**: ReactionsModal appeared behind sidebar
+   - **Fix**: Increased `--z-index-overlay` from 40 to 200
+   - **Files Modified**: `src/index.scss`
+
+### Feature Integration (Dec 2025)
+
+The zap animation feature was successfully integrated with other features via the `feature/integrate-incrementally` branch (now merged to main):
+
+1. **User Mentions Fix** - Prevents double-encoding in user mentions
+2. **Dropdown Z-Index Fix** - Trending dropdown appears correctly above galleries
+3. **Custom Emoji Reactions** - Full emoji reaction system with NIP-25/NIP-30 support
+4. **Zap Animations** - Global lightning bolt animations for sent/received zaps
+
+All features are now live on the `main` branch and the `upstream-ready` branch (prepared for upstream PR contribution).
 
 ---
 
