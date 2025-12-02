@@ -406,12 +406,17 @@ const WalletContent: Component = () => {
     setTopUpAmount(amount);
   };
 
-  const handleTopUpInputChange = (value: string) => {
+const handleTopUpInputChange = (value: string) => {
     const numValue = parseInt(value) || 0;
-    setTopUpAmount(numValue);
+    
+    // Clamp to valid range (minimum 1000 sats, maximum based on wallet limit)
+    const clampedValue = Math.max(1000, Math.min(numValue, maxTopUpAmount()));
+    
+    setTopUpAmount(clampedValue);
+    
     // Select preset if it matches, otherwise clear
-    const matchingPreset = topUpPresets.find(p => p.amount === numValue);
-    setSelectedPreset(matchingPreset ? numValue : null);
+    const matchingPreset = topUpPresets.find(p => p.amount === clampedValue);
+    setSelectedPreset(matchingPreset ? clampedValue : null);
   };
 
   const generateQRCode = async (invoice: string) => {
