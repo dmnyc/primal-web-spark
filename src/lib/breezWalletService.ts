@@ -24,6 +24,7 @@ import initBreezSDK, {
 } from '@breeztech/breez-sdk-spark/web';
 import { logError, logInfo, logWarning } from './logger';
 import { clearBreezStorage, needsStorageMigration } from './clearBreezStorage';
+import '../lib/resetBreezWallet'; // Load emergency reset utility
 
 /**
  * Breez Wallet Service
