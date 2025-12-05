@@ -23,6 +23,7 @@ import initBreezSDK, {
   CheckLightningAddressRequest,
 } from '@breeztech/breez-sdk-spark/web';
 import { logError, logInfo, logWarning } from './logger';
+import { clearBreezStorage, needsStorageMigration } from './clearBreezStorage';
 
 /**
  * Breez Wallet Service
@@ -137,6 +138,24 @@ class BreezWalletService {
 
       // Storage directory for web (uses IndexedDB)
       const storageDir = 'breez-spark-wallet';
+
+      // WORKAROUND: Auto-clear storage if upgrading from 0.4.2 to 0.5.2
+      // This prevents hanging due to incompatible storage format
+      if (needsStorageMigration()) {
+        logWarning('[BreezWallet] Detected SDK version change - clearing old storage to prevent hang');
+        logWarning('[BreezWallet] Wallet will need to be restored from mnemonic');
+
+        try {
+          await clearBreezStorage();
+          logInfo('[BreezWallet] Storage cleared successfully');
+        } catch (error) {
+          logError('[BreezWallet] Failed to clear storage:', error);
+          logWarning('[BreezWallet] Continuing with connection attempt...');
+        }
+      }
+
+      // Mark current version
+      localStorage.setItem('breez_sdk_version', '0.5.2');
 
       // Connect to SDK with timeout
       const connectRequest: ConnectRequest = {
