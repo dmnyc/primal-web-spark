@@ -73,11 +73,22 @@ class BreezWalletService {
 
     try {
       logInfo('[BreezWallet] Initializing WASM module...');
-      await initBreezSDK();
+
+      // Add timeout to catch hanging WASM initialization
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('WASM initialization timeout after 30s')), 30000)
+      );
+
+      await Promise.race([
+        initBreezSDK(),
+        timeoutPromise
+      ]);
+
       this.wasmInitialized = true;
-      logInfo('[BreezWallet] WASM module initialized');
+      logInfo('[BreezWallet] WASM module initialized successfully');
     } catch (error) {
       logError('[BreezWallet] Failed to initialize WASM:', error);
+      logError('[BreezWallet] Error details:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
       throw new Error(`Failed to initialize Breez SDK WASM: ${error}`);
     }
   }
@@ -116,6 +127,8 @@ class BreezWalletService {
       // Leave realTimeSyncServerUrl undefined to disable it
       config.realTimeSyncServerUrl = undefined;
 
+      logInfo('[BreezWallet] Config created:', { network, storageDir: 'breez-spark-wallet', privateMode: true });
+
       // Create seed from mnemonic
       const seed: Seed = {
         type: 'mnemonic',
@@ -125,14 +138,24 @@ class BreezWalletService {
       // Storage directory for web (uses IndexedDB)
       const storageDir = 'breez-spark-wallet';
 
-      // Connect to SDK
+      // Connect to SDK with timeout
       const connectRequest: ConnectRequest = {
         config,
         seed,
         storageDir,
       };
 
-      this.sdk = await connect(connectRequest);
+      logInfo('[BreezWallet] Calling connect() with request...');
+
+      // Add timeout for connection (60 seconds)
+      const connectTimeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Connection timeout after 60s')), 60000)
+      );
+
+      this.sdk = await Promise.race([
+        connect(connectRequest),
+        connectTimeoutPromise
+      ]);
 
       this.state.isConnected = true;
       this.state.isInitialized = true;
