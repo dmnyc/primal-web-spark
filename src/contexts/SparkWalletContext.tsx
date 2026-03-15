@@ -435,12 +435,11 @@ export const SparkWalletProvider: ParentComponent = (props) => {
     try {
       // Parse invoice to get amount for pending payment indicator
       try {
-        const { parseInvoice } = await import('@breeztech/breez-sdk-spark/web');
-        const parsedInvoice = await parseInvoice(invoice);
-        const amountSats = parsedInvoice.amountMsat ? Number(parsedInvoice.amountMsat) / 1000 : 0;
-
-        // Set pending payment before sending
-        setPendingPayment(amountSats, 'outgoing');
+        const parsed = await breezWallet.parseInput(invoice);
+        if (parsed && parsed.type === 'bolt11' && parsed.invoice?.amountMsat) {
+          const amountSats = Number(parsed.invoice.amountMsat) / 1000;
+          setPendingPayment(amountSats, 'outgoing');
+        }
       } catch (error) {
         logWarning('[SparkWallet] Failed to parse invoice for pending indicator:', error);
       }
@@ -748,7 +747,6 @@ export const SparkWalletProvider: ParentComponent = (props) => {
       eventListenerId = await breezWallet.addEventListener((event) => {
         switch (event.type) {
           case 'synced':
-          case 'dataSynced':
             // Refresh balance on sync events
             refreshBalance().catch(error => {
               logError('[SparkWallet] Failed to refresh balance on event:', error);
@@ -827,8 +825,8 @@ export const SparkWalletProvider: ParentComponent = (props) => {
                     timestamp: payment.timestamp,
                     description: payment.details?.type === 'lightning' ? payment.details.description : undefined,
                     invoice: payment.details?.type === 'lightning' ? payment.details.invoice : undefined,
-                    preimage: payment.details?.type === 'lightning' ? payment.details.preimage : undefined,
-                    paymentHash: payment.details?.type === 'lightning' ? payment.details.paymentHash : undefined,
+                    preimage: payment.details?.type === 'lightning' ? payment.details.htlcDetails?.preimage : undefined,
+                    paymentHash: payment.details?.type === 'lightning' ? payment.details.htlcDetails?.paymentHash : undefined,
                   },
                   account.activeRelays,
                   account.publicKey
@@ -846,6 +844,7 @@ export const SparkWalletProvider: ParentComponent = (props) => {
             }
             break;
 
+          case 'paymentPending':
           case 'paymentFailed':
           case 'claimedDeposits':
             // Refresh balance on these events

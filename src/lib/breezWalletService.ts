@@ -124,6 +124,7 @@ class BreezWalletService {
       const config: Config = defaultConfig(network);
       config.apiKey = key;
       config.privateEnabledDefault = true; // Enable privacy mode by default
+      config.supportLnurlVerify = true;
 
       // For web implementation, real-time sync is optional
       // Leave realTimeSyncServerUrl undefined to disable it
@@ -140,7 +141,7 @@ class BreezWalletService {
       // Storage directory for web (uses IndexedDB)
       const storageDir = 'breez-spark-wallet';
 
-      // WORKAROUND: Auto-clear storage if upgrading from 0.4.2 to 0.5.2
+      // WORKAROUND: Auto-clear storage if upgrading SDK versions
       // This prevents hanging due to incompatible storage format
       if (needsStorageMigration()) {
         logWarning('[BreezWallet] Detected SDK version change - clearing old storage to prevent hang');
@@ -156,7 +157,7 @@ class BreezWalletService {
       }
 
       // Mark current version
-      localStorage.setItem('breez_sdk_version', '0.5.2');
+      localStorage.setItem('breez_sdk_version', '0.11.0');
 
       // Connect to SDK with timeout
       const connectRequest: ConnectRequest = {
@@ -424,15 +425,17 @@ class BreezWalletService {
           this.syncBalance();
           break;
 
-        case 'dataSynced':
-          logInfo(`[BreezWallet] Data synced (new records: ${event.didPullNewRecords})`);
-          if (event.didPullNewRecords) {
-            this.syncBalance();
-          }
+        case 'optimization':
+          logInfo(`[BreezWallet] Optimization event received`);
           break;
 
         case 'paymentSucceeded':
           logInfo('[BreezWallet] Payment succeeded');
+          this.syncBalance();
+          break;
+
+        case 'paymentPending':
+          logInfo('[BreezWallet] Payment pending');
           this.syncBalance();
           break;
 
@@ -650,9 +653,9 @@ class BreezWalletService {
   private mapPaymentToInfo(payment: Payment): BreezPaymentInfo {
     const info: BreezPaymentInfo = {
       id: payment.id,
-      amount: Number(payment.amount),
-      fees: Number(payment.fees),
-      paymentType: payment.paymentType, // 'sent' or 'received'
+      amount: Number(payment.amount), // bigint -> number
+      fees: Number(payment.fees), // bigint -> number
+      paymentType: payment.paymentType,
       status: payment.status,
       timestamp: payment.timestamp,
     };
@@ -661,9 +664,12 @@ class BreezWalletService {
     if (payment.details) {
       if (payment.details.type === 'lightning') {
         info.invoice = payment.details.invoice;
-        info.preimage = payment.details.preimage;
-        info.paymentHash = payment.details.paymentHash;
         info.description = payment.details.description;
+        // In 0.9.x, preimage and paymentHash moved into htlcDetails
+        if (payment.details.htlcDetails) {
+          info.preimage = payment.details.htlcDetails.preimage;
+          info.paymentHash = payment.details.htlcDetails.paymentHash;
+        }
       } else if (payment.details.type === 'spark' && payment.details.invoiceDetails) {
         info.invoice = payment.details.invoiceDetails.invoice;
         info.description = payment.details.invoiceDetails.description;

@@ -43,7 +43,7 @@ export async function clearBreezStorage(): Promise<void> {
  */
 export function needsStorageMigration(): boolean {
   const storedVersion = localStorage.getItem('breez_sdk_version');
-  const currentVersion = '0.5.2';
+  const currentVersion = '0.11.0';
 
   // If no version stored, or version is different, we might need migration
   return !storedVersion || storedVersion !== currentVersion;
