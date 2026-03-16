@@ -258,6 +258,8 @@ const WalletContent: Component = () => {
     }
 
     try {
+      setIsRestoring(true);
+
       // Connect and restore the wallet
       await sparkWallet.actions.connect(seed, false);
 
@@ -285,6 +287,8 @@ const WalletContent: Component = () => {
     } catch (error: any) {
       console.error('Manual restore failed:', error);
       toast?.sendWarning(`Failed to restore: ${error?.message || 'Unknown error'}`);
+    } finally {
+      setIsRestoring(false);
     }
   };
 
@@ -1618,7 +1622,7 @@ const WalletContent: Component = () => {
                   onInput={(e) => setMnemonic(e.currentTarget.value)}
                   placeholder="Enter your 12-24 word mnemonic..."
                   rows={3}
-                  disabled={sparkWallet.store.isConnecting}
+                  disabled={isRestoring()}
                   autofocus
                   classList={{ [styles.mnemonicHidden]: !showMnemonic() }}
                 />
@@ -1677,17 +1681,17 @@ const WalletContent: Component = () => {
           <Show when={restoreMethod() === 'file'}>
             <ButtonPrimary
               onClick={handleRestoreFromManual}
-              disabled={sparkWallet.store.isConnecting || !mnemonic().trim()}
+              disabled={isRestoring() || !mnemonic().trim()}
             >
-              {sparkWallet.store.isConnecting ? 'Restoring...' : 'Restore Wallet'}
+              {isRestoring() ? 'Restoring...' : 'Restore Wallet'}
             </ButtonPrimary>
           </Show>
           <Show when={restoreMethod() === 'manual'}>
             <ButtonPrimary
               onClick={handleRestoreFromManual}
-              disabled={sparkWallet.store.isConnecting || !mnemonic().trim()}
+              disabled={isRestoring() || !mnemonic().trim()}
             >
-              {sparkWallet.store.isConnecting ? 'Restoring...' : 'Restore Wallet'}
+              {isRestoring() ? 'Restoring...' : 'Restore Wallet'}
             </ButtonPrimary>
           </Show>
         </div>

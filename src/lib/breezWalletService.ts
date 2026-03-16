@@ -156,9 +156,6 @@ class BreezWalletService {
         }
       }
 
-      // Mark current version
-      localStorage.setItem('breez_sdk_version', '0.11.0');
-
       // Connect to SDK with timeout
       const connectRequest: ConnectRequest = {
         config,
@@ -180,6 +177,9 @@ class BreezWalletService {
 
       this.state.isConnected = true;
       this.state.isInitialized = true;
+
+      // Mark current version only after successful connection
+      localStorage.setItem('breez_sdk_version', '0.11.0');
 
       logInfo('[BreezWallet] Step 3/4: Connected to SDK, syncing balance...');
 
