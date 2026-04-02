@@ -15,7 +15,7 @@ import CurrencyDropdown from '../components/CurrencyDropdown/CurrencyDropdown';
 import LightningAddressCard from '../components/LightningAddressCard/LightningAddressCard';
 import LightningFlash from '../components/LightningFlash/LightningFlash';
 import Loader from '../components/Loader/Loader';
-import { generateMnemonic } from '@scure/bip39';
+import { generateMnemonic, validateMnemonic } from '@scure/bip39';
 import { wordlist } from '@scure/bip39/wordlists/english.js';
 import { useCurrencyConversion } from '../hooks/useCurrencyConversion';
 import { formatFiatAmount } from '../lib/currency';
@@ -120,6 +120,11 @@ const WalletContent: Component = () => {
 
     if (!seed) {
       toast?.sendWarning('Please enter a mnemonic');
+      return;
+    }
+
+   if (!validateMnemonic(seed, wordlist)) {
+      toast?.sendWarning('Invalid seed phrase. Please check your 12-word recovery phrase.');
       return;
     }
 
@@ -251,7 +256,12 @@ const WalletContent: Component = () => {
       toast?.sendWarning('Please enter a mnemonic');
       return;
     }
-
+    
+    if (!validateMnemonic(seed, wordlist)) {
+      toast?.sendWarning('Invalid seed phrase. Please check your 12-word recovery phrase.');
+      return;
+    }
+    
     if (!account?.publicKey) {
       toast?.sendWarning('Please log in first');
       return;
